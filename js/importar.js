@@ -199,6 +199,13 @@ export function interpretar(lineas) {
     if (c.totalDoc && Math.abs(c.totalDoc - suma) > 2) avisos.push(`${c.cliente}: los productos suman ${suma.toLocaleString('es-CO')} y el documento dice ${c.totalDoc.toLocaleString('es-CO')}.`);
     if (c.items.some(it => it.dudoso)) avisos.push(`${c.cliente}: revisa cantidades y precios, no pude comprobarlos con el total de la línea.`);
   });
+  // un mismo código de producto debe tener un solo nombre: se usa el más repetido (corrige errores de lectura)
+  const nombres = {};
+  for (const c of clientes) for (const it of c.items) if (it.codigo) { const m = nombres[it.codigo] = nombres[it.codigo] || {}; m[it.producto] = (m[it.producto] || 0) + 1; }
+  for (const c of clientes) for (const it of c.items) if (it.codigo && nombres[it.codigo]) {
+    const [mejor] = Object.entries(nombres[it.codigo]).sort((x, y) => y[1] - x[1] || y[0].length - x[0].length)[0];
+    it.producto = mejor;
+  }
   const filas = [];
   for (const c of clientes) for (const it of c.items) filas.push({
     cliente: c.cliente, direccion: c.direccion, telefono: c.telefono, factura: c.factura,

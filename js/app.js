@@ -31,7 +31,7 @@ const MOTIVOS = {
 };
 const GASTOS = ['Peaje', 'Combustible', 'Parqueadero', 'Alimentación', 'Cargue/descargue', 'Otro'];
 const DENOM = [100000, 50000, 20000, 10000, 5000, 2000, 1000];
-const FORM_VIEWS = ['parada', 'liquidar', 'nueva', 'gastos', 'cargue', 'ajustes'];
+const FORM_VIEWS = ['parada', 'liquidar', 'nueva', 'gastos', 'ajustes'];
 const MAX_FOTOS = 3;
 const chip = e => `<span class="chip st-${esc(e)}">${esc(ESTADOS[e]?.t ?? e)}</span>`;
 const rchip = e => `<span class="chip st-${esc(e)}">${esc(RUTA_EST[e] || e)}</span>`;
@@ -159,15 +159,16 @@ function iniciarSesion() {
     ? fb.query(C('rutas'), fb.orderBy('fecha', 'desc'), fb.limit(200))
     : fb.query(C('rutas'), fb.where('conductorUid', '==', S.user.uid), fb.where('abierta', '==', true));
   unsub.rutas = fb.onSnapshot(q, { includeMetadataChanges: true }, snap => {
+    const teniaRuta = !!ruta();
     S.rutas = snap.docs.map(d => Object.assign({ id: d.id }, clone(d.data())));
     S.rutas.sort((a, b) => (b.fecha || '').localeCompare(a.fecha || '') || (b.creada || '').localeCompare(a.creada || ''));
     S.rutasReady = true; S.pendientes.rutas = snap.metadata.hasPendingWrites; updateNet();
-    if (S.mode === 'conductor' && !S.rutaId) {
+    if (S.mode === 'conductor' && !S.rutaId && S.view !== 'nueva') {
       const saved = ls.get('rc_ruta_' + S.user.uid);
       const r = S.rutas.find(x => x.id === saved) || (S.rutas.length === 1 ? S.rutas[0] : null);
       if (r) { selectRuta(r.id, 'paradas'); return; }
     }
-    if (!FORM_VIEWS.includes(S.view)) render(); else updateCtx();
+    if (!FORM_VIEWS.includes(S.view) || (S.rutaId && !teniaRuta && ruta())) render(); else updateCtx();
   }, e => { toast('No se pudieron leer las rutas: ' + errTxt(e)); });
   if (esOficina()) {
     unsub.usuarios = fb.onSnapshot(C('usuarios'), snap => {
@@ -214,7 +215,7 @@ function totales(r, paradas) {
     t.facturado += valorFactura(p);
     if (e !== 'pendiente') { t.vEntregado += valorEntregado(p); const g = p.pago || {}; t.efectivo += int(g.efectivo); t.transferencia += int(g.transferencia); t.credito += int(g.credito); }
     (p.items || []).forEach((i, k) => {
-      const key = (i.ref || '') + '|' + i.producto;
+      const key = i.ref ? 'R:' + String(i.ref).toUpperCase() : 'P:' + String(i.producto).toLowerCase();
       carga[key] = carga[key] || { ref: i.ref, producto: i.producto, cant: 0 }; carga[key].cant += i.cant;
       const d = i.cant - entregadoDe(p, k);
       if (d > 0) {
@@ -429,6 +430,8 @@ async function cambiarClave() {
 // ---------- conductor ----------
 function vConductor() {
   if (!S.rutasReady) return `<div class="empty">Cargando tus rutas…</div>`;
+  if (S.view === 'nueva') return S.config.conductoresCrean === false ? (S.view = '', vElegirRuta()) : vNueva();
+  if (S.rutaId && !ruta() && S.rutaNueva === S.rutaId) return `<div class="empty">Abriendo tu ruta…</div>`;
   if (!S.rutaId || !ruta()) return vElegirRuta();
   const r = ruta();
   showTabs();
@@ -454,7 +457,8 @@ function vElegirRuta() {
       <div class="who"><b>${esc(r.codigo)} · ${fechaTxt(r.fecha)}</b><span>${esc(r.vehiculo || '')} · ${r.nParadas || 0} paradas</span><span>${esc(r.remitente || '')}</span></div>
       <div class="amt">${rchip(r.estado)}</div>
     </button>`).join('')}</div>`
-    : `<div class="empty">No tienes rutas abiertas. Cuando la oficina te asigne una, aparecerá aquí.</div>`}`;
+    : `<div class="empty">No tienes rutas abiertas.${S.config.conductoresCrean === false ? ' Cuando la oficina te asigne una, aparecerá aquí.' : ''}</div>`}
+  ${S.config.conductoresCrean === false ? '' : `<div class="next"><div class="eyebrow">¿Te entregaron la planilla en la bodega?</div><div class="small">Tómale una foto y la app arma tu ruta con los clientes ordenados por cercanía.</div><button class="btn primary" data-act="nuevaConductor">Crear ruta desde la planilla</button></div>`}`;
 }
 function cabeceraRuta(r, t) {
   const pct = k => t.n ? (t[k] / t.n * 100) : 0;
@@ -466,7 +470,7 @@ function cabeceraRuta(r, t) {
       <div class="sum-line"><span class="muted">Transferencias</span><b>${fmt(t.transferencia)}</b></div>
       <div class="sum-line"><span class="muted">Devolución</span><b>${fmt(t.vDevGest)}</b></div>
     </div>
-    ${S.rutas.length > 1 ? `<button class="btn sm ghost" data-act="cambiarRuta">Cambiar de ruta</button>` : ''}
+    <div class="row">${S.rutas.length > 1 ? `<button class="btn sm ghost" data-act="cambiarRuta">Cambiar de ruta</button>` : ''}${S.config.conductoresCrean === false ? '' : `<button class="btn sm ghost" data-act="nuevaConductor">Otra planilla</button>`}</div>
   </div>`;
 }
 function vParadas(r) {
@@ -671,6 +675,7 @@ function vCargue(r) {
     <div class="tablewrap"><table><thead><tr><th>Producto</th><th>Ref.</th><th class="r">Unidades</th></tr></thead>
     <tbody>${t.carga.map(c => `<tr><td>${esc(c.producto)}</td><td class="mono">${esc(c.ref || '')}</td><td class="r num">${c.cant}</td></tr>`).join('') || '<tr><td colspan="3" class="muted">Sin productos.</td></tr>'}</tbody>
     <tfoot><tr><td colspan="2">${S.paradas.length} clientes · valor total ${fmt(t.facturado)}</td><td class="r num">${t.carga.reduce((a, c) => a + c.cant, 0)}</td></tr></tfoot></table></div>
+    ${!conf && r.creadaPorConductor && r.creadaPor === S.user.uid && r.estado === 'cargue' ? `<div class="row small"><span class="muted">¿La planilla se leyó mal?</span>${S.confirmDel === r.id ? `<button class="btn danger solid sm" data-act="borrarRuta">Sí, descartar la ruta</button><button class="btn sm" data-act="cancelDel">No</button>` : `<button class="btn danger sm" data-act="pedirDel">Descartar y volver a empezar</button>`}</div>` : ''}
     ${conf || r.estado === 'liquidada' ? '' : `<label class="f">Novedad en el cargue (opcional)<textarea id="f-cnov" placeholder="Ej: llegaron 46 cajas de aceite, no 48"></textarea></label>
     <button class="btn primary block" data-act="confirmarCargue">Recibí esta mercancía conforme</button>`}
   </div>`;
@@ -757,7 +762,7 @@ function vRutas() {
   ${S.rutas.length ? `<div class="tablewrap"><table>
     <thead><tr><th>Ruta</th><th>Fecha</th><th>Conductor</th><th class="hide-sm">Vehículo</th><th class="r">Paradas</th><th class="r hide-sm">Valor</th><th>Estado</th></tr></thead>
     <tbody>${S.rutas.map(r => `<tr style="cursor:pointer" data-act="verRuta" data-v="${esc(r.id)}">
-      <td class="mono">${esc(r.codigo)}</td><td>${fechaTxt(r.fecha)}</td><td>${esc(r.conductor)}</td><td class="hide-sm">${esc(r.vehiculo || '')}</td>
+      <td class="mono">${esc(r.codigo)}${r.creadaPorConductor ? ' <span class="pill">Del conductor</span>' : ''}</td><td>${fechaTxt(r.fecha)}</td><td>${esc(r.conductor)}</td><td class="hide-sm">${esc(r.vehiculo || '')}</td>
       <td class="r num">${r.nParadas || 0}</td><td class="r num hide-sm">${fmt(r.total)}</td><td>${rchip(r.estado)}</td></tr>`).join('')}</tbody></table></div>`
       : `<div class="empty">Aún no hay rutas. Crea la primera desde un PDF de la empresa o pegando el listado desde Excel.</div>`}`;
 }
@@ -772,6 +777,7 @@ function vRutaOficina() {
     <div class="kpi"><span class="l">Transferencias</span><span class="v">${fmt(t.transferencia + t.carteraTr)}</span></div>
     <div class="kpi"><span class="l">Devolución</span><span class="v">${fmt(t.vDevGest)}</span></div>
   </div>`;
+  if (r.creadaPorConductor) h += `<div class="banner info"><div class="row between" style="width:100%"><span>Ruta creada por el conductor desde la planilla${(r.planillaFotos || []).length ? '. Compara la lista con la foto' : ''}.</span>${(r.planillaFotos || []).length ? `<button class="btn sm" data-act="verFotos" data-v="${esc(r.planillaFotos.join(','))}">Ver foto de la planilla</button>` : ''}</div></div>`;
   h += `<div class="banner ${r.cargue && r.cargue.confirmado ? 'ok' : 'warn'}"><div>${r.cargue && r.cargue.confirmado ? `Cargue confirmado por el conductor el ${fechaHora(r.cargue.hora)}.${r.cargue.novedad ? ` <b>Novedad:</b> ${esc(r.cargue.novedad)}` : ''}` : 'El conductor aún no ha confirmado el cargue.'}</div></div>`;
   {
     const start = parseDir(r.bodega), esq = esquema(S.paradas, start, r.regreso);
@@ -916,9 +922,44 @@ async function cerrarLiq() {
 // ---- nueva ruta ----
 const ENCABEZADOS = 'Cliente\tDirección\tTeléfono\tFactura\tReferencia\tProducto\tCantidad\tPrecio unitario';
 function conductoresActivos() { return S.usuarios.filter(u => u.rol === 'conductor' && u.activo); }
+function nuevaBase() {
+  const cod = (S.mode === 'conductor' ? 'C' : 'R') + '-' + hoy().replace(/-/g, '') + '-' + Math.random().toString(36).slice(2, 6).toUpperCase();
+  return { codigo: cod, fecha: hoy(), conductorUid: S.mode === 'conductor' ? S.user.uid : '', vehiculo: S.mode === 'conductor' ? (S.perfil.placa || '') : '', remitente: S.mode === 'conductor' ? '' : (S.config.empresa || ''), base: '', ciudad: S.config.ciudad || 'Barranquilla', bodega: S.config.bodega || '', regreso: true, texto: '', err: '', orden: null, modo: 'opt', _key: '', fotosPlanilla: [] };
+}
+function bloqueListado(N) {
+  const cond = S.mode === 'conductor';
+  return `<div class="card">
+    <div class="row between"><h3>${cond ? '1. Planilla' : 'Listado de clientes y mercancía'}</h3><div class="row">
+      <label class="btn sm primary">Tomar foto de la planilla<input type="file" id="n-cam" accept="image/*" capture="environment" hidden></label>
+      <label class="btn sm">Subir PDF o fotos<input type="file" id="n-file" accept="application/pdf,.pdf,image/*" multiple hidden></label>
+      ${cond ? '' : '<button class="btn sm ghost" data-act="copiarEnc">Copiar encabezados</button>'}</div></div>
+    <div id="impStatus"></div>
+    <details class="small muted"><summary>Consejos para la foto</summary>
+      Una foto por página, con la hoja plana y completa dentro de la foto. Buena luz, sin sombras ni reflejos, y el celular derecho sobre la hoja. Si la planilla tiene varias páginas, elige todas las fotos juntas en "Subir PDF o fotos".</details>
+    ${cond ? `<details class="small"><summary>Ver o pegar el listado como texto</summary>` : `<p class="small muted">Toma una foto de la planilla, importa el PDF que entrega la empresa, o copia las filas desde Excel y pégalas aquí. Una fila por producto, en este orden: <span class="mono">Cliente · Dirección · Teléfono · Factura · Referencia · Producto · Cantidad · Precio unitario</span>. Las filas con la misma factura se agrupan en una sola parada y la app las ordena para recorrer menos distancia.</p>`}
+    <textarea id="n-texto" data-n="texto" style="min-height:160px;font-family:var(--f-mono);font-size:13px" placeholder="Pega aquí las filas copiadas de Excel">${esc(N.texto)}</textarea>
+    ${cond ? '</details>' : ''}
+    <div id="preview"></div>
+  </div>`;
+}
 function vNueva() {
+  const N = S.nueva || (S.nueva = nuevaBase());
+  if (S.mode === 'conductor') {
+    return `<div class="row between"><button class="btn sm ghost" data-act="cancelarNueva">← Volver</button><span class="eyebrow">${esc(S.perfil.nombre)}</span></div>
+    <div style="display:flex;flex-direction:column;gap:6px"><h1>Crear mi ruta desde la planilla</h1>
+    <p class="small muted">Tómale una foto a la planilla que te entregaron en la bodega. La app arma la lista de clientes, la ordena por cercanía y la oficina la ve al instante.</p></div>
+    ${bloqueListado(N)}
+    <div class="card"><h3>2. Datos de la ruta</h3><div class="grid2">
+      <label class="f">Vehículo / placa<input type="text" id="n-vehiculo" data-n="vehiculo" value="${esc(N.vehiculo)}"></label>
+      <label class="f">Empresa que despacha<input type="text" id="n-remitente" data-n="remitente" value="${esc(N.remitente)}" placeholder="Ej: Distribuidora La Costa"></label>
+      <label class="f">Base en efectivo que te dieron<input type="text" inputmode="numeric" id="n-base" data-n="base" value="${esc(N.base)}" placeholder="0"></label>
+      <label class="f">Punto de partida (bodega)<input type="text" id="n-bodega" data-n="bodega" value="${esc(N.bodega)}" placeholder="Ej: Cl 30 #44-50"></label>
+    </div>
+    <label class="row small"><input type="checkbox" id="n-regreso" data-n="regreso" ${N.regreso ? 'checked' : ''}> Regreso a la bodega al terminar</label></div>
+    <div class="err" id="nErr">${esc(N.err)}</div>
+    <button class="btn primary block" data-act="crearRuta">Crear mi ruta</button>`;
+  }
   const cs = conductoresActivos();
-  const N = S.nueva || (S.nueva = { codigo: 'R-' + hoy().replace(/-/g, '') + '-' + String(Math.floor(Math.random() * 900) + 100), fecha: hoy(), conductorUid: '', vehiculo: '', remitente: S.config.empresa || '', base: '', ciudad: S.config.ciudad || 'Barranquilla', bodega: S.config.bodega || '', regreso: true, texto: '', err: '', orden: null, modo: 'opt', _key: '' });
   return `<div><div class="eyebrow">Oficina</div><h1>Nueva ruta</h1></div>
   ${S.usuariosReady && !cs.length ? `<div class="banner warn"><div>No hay conductores activos. Créalos en la pestaña <b>Conductores</b> antes de crear la ruta.</div></div>` : ''}
   <div class="card"><div class="grid3">
@@ -933,18 +974,7 @@ function vNueva() {
   </div>
   <label class="row small"><input type="checkbox" id="n-regreso" data-n="regreso" ${N.regreso ? 'checked' : ''}> El vehículo regresa a la bodega al terminar</label>
   </div>
-  <div class="card">
-    <div class="row between"><h3>Listado de clientes y mercancía</h3><div class="row">
-      <label class="btn sm primary">Tomar foto de la planilla<input type="file" id="n-cam" accept="image/*" capture="environment" hidden></label>
-      <label class="btn sm">Subir PDF o fotos<input type="file" id="n-file" accept="application/pdf,.pdf,image/*" multiple hidden></label>
-      <button class="btn sm ghost" data-act="copiarEnc">Copiar encabezados</button></div></div>
-    <div id="impStatus"></div>
-    <details class="small muted"><summary>Consejos para la foto</summary>
-      Una foto por página, con la hoja plana y completa dentro de la foto. Buena luz, sin sombras ni reflejos, y el celular derecho sobre la hoja. Si la planilla tiene varias páginas, elige todas las fotos juntas en "Subir PDF o fotos".</details>
-    <p class="small muted">Toma una foto de la planilla, importa el PDF que entrega la empresa, o copia las filas desde Excel y pégalas aquí. Una fila por producto, en este orden: <span class="mono">Cliente · Dirección · Teléfono · Factura · Referencia · Producto · Cantidad · Precio unitario</span>. Las filas con la misma factura se agrupan en una sola parada y la app las ordena para recorrer menos distancia.</p>
-    <textarea id="n-texto" data-n="texto" style="min-height:160px;font-family:var(--f-mono);font-size:13px" placeholder="Pega aquí las filas copiadas de Excel">${esc(N.texto)}</textarea>
-    <div id="preview"></div>
-  </div>
+  ${bloqueListado(N)}
   <div class="err" id="nErr">${esc(N.err)}</div>
   <button class="btn primary block" data-act="crearRuta">Crear ruta</button>`;
 }
@@ -963,6 +993,62 @@ function parsePlanilla(txt) {
     grupos.get(key).items.push({ ref, producto, cant: q, precio: pr });
   });
   return { paradas: [...grupos.values()].map((g, k) => Object.assign(g, { orden: k + 1 })), errs };
+}
+function serializar(paradas) {
+  const lim = v => String(v ?? '').replace(/[\t\r\n]+/g, ' ').trim();
+  return ENCABEZADOS + '\n' + paradas.flatMap(p => p.items.map(i => [p.cliente, p.direccion, p.telefono, p.factura, i.ref, i.producto, int(i.cant), int(i.precio)].map(lim).join('\t'))).join('\n');
+}
+function vEditarParada(idx) {
+  const p = parsePlanilla(S.nueva.texto).paradas[idx]; if (!p) return '';
+  return `<div class="modal-in"><div class="row between"><h2>Revisar cliente</h2><button class="btn sm" data-act="cerrarModal">Cancelar</button></div>
+    <p class="small muted">Compara con la planilla y corrige lo que haga falta.</p>
+    <div class="grid2">
+      <label class="f">Cliente<input type="text" id="e-cliente" value="${esc(p.cliente)}"></label>
+      <label class="f">Factura<input type="text" id="e-factura" value="${esc(p.factura)}"></label>
+      <label class="f">Dirección<input type="text" id="e-direccion" value="${esc(p.direccion)}"></label>
+      <label class="f">Teléfono<input type="text" inputmode="tel" id="e-telefono" value="${esc(p.telefono)}"></label>
+    </div>
+    <h3>Productos</h3>
+    <div id="e-items" style="display:flex;flex-direction:column;gap:8px">${p.items.map((it, k) => filaItem(it, k)).join('')}</div>
+    <button class="btn sm" data-act="eAgregarItem" style="align-self:flex-start">+ Agregar producto</button>
+    <div class="err" id="eErr"></div>
+    <div class="row between"><button class="btn danger sm" data-act="eEliminar" data-v="${idx}">Quitar este cliente</button><button class="btn primary" data-act="eGuardar" data-v="${idx}">Guardar cambios</button></div>
+  </div>`;
+}
+function filaItem(it, k) {
+  return `<div class="e-item" style="display:grid;grid-template-columns:1fr 70px 100px 34px;gap:6px;align-items:end">
+    <label class="f">Producto${k === 0 ? '' : ''}<input type="text" class="e-prod" value="${esc((it.ref ? it.ref + ' · ' : '') + it.producto)}"></label>
+    <label class="f">Cant.<input type="text" inputmode="numeric" class="e-cant" value="${int(it.cant) || ''}"></label>
+    <label class="f">Precio unit.<input type="text" inputmode="numeric" class="e-precio" value="${int(it.precio) || ''}"></label>
+    <button class="btn sm ghost" data-act="eQuitarItem" aria-label="Quitar producto" style="padding:8px">✕</button></div>`;
+}
+function guardarEdicion(idx) {
+  const { paradas } = parsePlanilla(S.nueva.texto); const p = paradas[idx]; if (!p) return;
+  const v = id => document.getElementById(id).value.trim();
+  const items = [...document.querySelectorAll('#e-items .e-item')].map(row => {
+    const t = row.querySelector('.e-prod').value.trim(); const m = t.match(/^(\S+)\s·\s(.+)$/);
+    return { ref: m ? m[1] : '', producto: m ? m[2] : t, cant: int(row.querySelector('.e-cant').value), precio: int(row.querySelector('.e-precio').value) };
+  }).filter(i => i.producto || i.cant);
+  const err = document.getElementById('eErr');
+  if (!v('e-cliente')) { err.textContent = 'Escribe el nombre del cliente.'; return; }
+  if (!items.length) { err.textContent = 'El cliente debe tener al menos un producto, o quítalo.'; return; }
+  if (items.some(i => !i.producto || !i.cant)) { err.textContent = 'Cada producto necesita nombre y cantidad.'; return; }
+  const factura = v('e-factura');
+  if (factura && paradas.some((x, k) => k !== idx && (x.factura || '').toUpperCase() === factura.toUpperCase())) { err.textContent = 'Otro cliente ya tiene esa factura.'; return; }
+  Object.assign(p, { cliente: v('e-cliente'), factura, direccion: v('e-direccion'), telefono: v('e-telefono'), items });
+  conservarOrden(paradas, null);
+  cerrarModal(); toast('Cambios guardados.');
+}
+function conservarOrden(paradas, quitar) {
+  const N = S.nueva;
+  const ordenActual = (N.orden && N.orden.length === paradas.length + (quitar != null ? 0 : 0)) ? N.orden.slice() : paradas.map((p, i) => i);
+  let lista = paradas;
+  let orden = ordenActual;
+  if (quitar != null) { lista = paradas.filter((p, i) => i !== quitar); orden = ordenActual.filter(i => i !== quitar).map(i => i > quitar ? i - 1 : i); }
+  N.texto = serializar(lista);
+  const ta = document.getElementById('n-texto'); if (ta) ta.value = N.texto;
+  N.orden = orden; N._key = N.texto + '|' + N.bodega + '|' + N.regreso;
+  updatePreview();
 }
 function updatePreview() {
   const el = document.getElementById('preview'); if (!el || !S.nueva) return;
@@ -989,10 +1075,10 @@ function updatePreview() {
     ${!start ? `<div class="banner info"><div>Escribe el punto de partida para que el recorrido empiece desde la bodega.${N.bodega ? ' No reconocí esa dirección.' : ''}</div></div>` : ''}
     ${noRec ? `<div class="banner warn"><div><b>${noRec} ${noRec === 1 ? 'dirección no reconocida' : 'direcciones no reconocidas'}.</b> Quedan al final; súbelas a mano al lugar que corresponda.</div></div>` : ''}
     ${esquema(ord.map((p, k) => ({ direccion: p.direccion, orden: k + 1 })), start, N.regreso)}
-    <div class="tablewrap"><table><thead><tr><th>#</th><th>Cliente</th><th>Dirección</th><th class="r">Productos</th><th class="r">Valor</th><th>Mover</th></tr></thead>
+    <div class="tablewrap"><table><thead><tr><th>#</th><th>Cliente</th><th>Dirección</th><th class="r hide-sm">Productos</th><th class="r">Valor</th><th>Mover</th><th></th></tr></thead>
     <tbody>${N.orden.map((i, k) => { const p = paradas[i], u = parseDir(p.direccion); return `<tr><td class="num">${k + 1}</td><td>${esc(p.cliente)}<div class="mono muted">${esc(p.factura)}</div></td>
-      <td>${esc(p.direccion)}<div class="small ${u ? 'muted' : 'nodir'}">${u ? lblDir(u) : 'No reconocida'}</div></td><td class="r num">${p.items.length}</td><td class="r num">${fmt(valorFactura(p))}</td>
-      <td><div class="ord"><button class="btn sm" data-act="nMover" data-v="${k},-1" ${k === 0 ? 'disabled' : ''} aria-label="Subir">↑</button><button class="btn sm" data-act="nMover" data-v="${k},1" ${k === N.orden.length - 1 ? 'disabled' : ''} aria-label="Bajar">↓</button></div></td></tr>`; }).join('')}</tbody></table></div>
+      <td>${esc(p.direccion)}<div class="small ${u ? 'muted hide-sm' : 'nodir'}">${u ? lblDir(u) : 'No reconocida'}</div></td><td class="r num hide-sm">${p.items.length}</td><td class="r num">${fmt(valorFactura(p))}</td>
+      <td><div class="ord"><button class="btn sm" data-act="nMover" data-v="${k},-1" ${k === 0 ? 'disabled' : ''} aria-label="Subir">↑</button><button class="btn sm" data-act="nMover" data-v="${k},1" ${k === N.orden.length - 1 ? 'disabled' : ''} aria-label="Bajar">↓</button></div></td><td><button class="btn sm" data-act="nEditar" data-v="${i}">Editar</button></td></tr>`; }).join('')}</tbody></table></div>
   </div>`;
   el.innerHTML = `${errs.length ? `<div class="banner bad"><div>${errs.slice(0, 5).map(esc).join('<br>')}${errs.length > 5 ? `<br>y ${errs.length - 5} errores más.` : ''}</div></div>` : ''}
   ${paradas.length ? `<div class="banner ok"><div><b>${paradas.length} paradas</b> · ${paradas.reduce((a, p) => a + p.items.length, 0)} líneas de producto · valor ${fmt(total)}</div></div>${bloque}` : ''}`;
@@ -1003,27 +1089,33 @@ async function crearRuta() {
   const errEl = document.getElementById('nErr');
   const fail = m => { N.err = m; errEl.textContent = m; };
   const id = N.codigo.trim().replace(/[^\w-]/g, '-');
-  const cond = S.usuarios.find(u => u.uid === N.conductorUid);
+  const porConductor = S.mode === 'conductor';
+  const cond = porConductor ? { uid: S.user.uid, nombre: S.perfil.nombre, placa: S.perfil.placa || '' } : S.usuarios.find(u => u.uid === N.conductorUid);
   if (!id) return fail('Escribe el código de la ruta.');
   if (S.rutas.some(r => r.id === id)) return fail('Ya existe una ruta con ese código.');
   if (!cond) return fail('Elige el conductor.');
-  if (!paradas.length) return fail('Importa el PDF o pega el listado de clientes.');
+  if (!paradas.length) return fail(porConductor ? 'Toma la foto de la planilla primero.' : 'Importa el PDF o pega el listado de clientes.');
   if (errs.length) return fail('Corrige las filas con error antes de crear la ruta.');
   if (paradas.length > 450) return fail('Una ruta admite hasta 450 paradas.');
   const btn = document.querySelector('[data-act="crearRuta"]'); btn.disabled = true; btn.textContent = 'Creando ruta…';
   try {
+    const fotosIds = (N.fotosPlanilla || []).map(() => nuevoId());
     const b = fb.writeBatch(S.db);
     b.set(D('rutas/' + id), {
       codigo: N.codigo.trim(), fecha: N.fecha, conductorUid: cond.uid, conductor: cond.nombre, vehiculo: N.vehiculo.trim() || cond.placa || '', remitente: N.remitente.trim(),
       base: int(N.base), ciudad: N.ciudad.trim() || 'Barranquilla', bodega: N.bodega.trim(), regreso: !!N.regreso,
       kmEstimado: +kmDe(costoParadas(paradas, parseDir(N.bodega), N.regreso)).toFixed(1),
-      estado: 'cargue', abierta: true, creada: new Date().toISOString(), creadaPor: S.user.uid, cargue: null, gastos: [], cartera: [], liquidacion: null,
+      estado: 'cargue', abierta: true, creada: new Date().toISOString(), creadaPor: S.user.uid, creadaPorConductor: porConductor, planillaFotos: fotosIds, cargue: null, gastos: [], cartera: [], liquidacion: null,
       nParadas: paradas.length, total: paradas.reduce((a, p) => a + valorFactura(p), 0)
     });
     for (const p of paradas) b.set(D('rutas/' + id + '/paradas/p' + String(p.orden).padStart(3, '0')), Object.assign({ estado: 'pendiente' }, p));
     await w(b.commit());
-    S.nueva = null; toast(`Ruta creada y asignada a ${cond.nombre}.`);
-    selectRuta(id, 'ruta'); window.scrollTo(0, 0);
+    const ahora = new Date().toISOString();
+    (N.fotosPlanilla || []).forEach((data, k) => w(fb.setDoc(D(`rutas/${id}/fotos/${fotosIds[k]}`), { paradaId: '', tipo: 'planilla', data, fecha: ahora, autorUid: S.user.uid })));
+    S.nueva = null;
+    if (porConductor) { toast('Ruta creada. Ahora confirma el cargue.'); S.rutaNueva = id; selectRuta(id, 'cargue'); }
+    else { toast(`Ruta creada y asignada a ${cond.nombre}.`); selectRuta(id, 'ruta'); }
+    window.scrollTo(0, 0);
   } catch (e) { btn.disabled = false; btn.textContent = 'Crear ruta'; fail('No se pudo crear la ruta. ' + errTxt(e)); }
 }
 async function borrarRuta() {
@@ -1033,7 +1125,7 @@ async function borrarRuta() {
     const refs = ps.docs.map(d => D('rutas/' + r.id + '/paradas/' + d.id)).concat(fs.docs.map(d => D('rutas/' + r.id + '/fotos/' + d.id)));
     for (let i = 0; i < refs.length; i += 400) { const b = fb.writeBatch(S.db); refs.slice(i, i + 400).forEach(x => b.delete(x)); await w(b.commit()); }
     await w(fb.deleteDoc(D('rutas/' + r.id)));
-    S.confirmDel = null; selectRuta(null, 'rutas'); toast('Ruta eliminada.');
+    S.confirmDel = null; selectRuta(null, S.mode === 'conductor' ? '' : 'rutas'); toast(S.mode === 'conductor' ? 'Ruta descartada.' : 'Ruta eliminada.');
   } catch (e) { toast('No se pudo eliminar: ' + errTxt(e)); }
 }
 
@@ -1111,9 +1203,11 @@ async function importarArchivos(files) {
         const imgs = await pdfAImagenes(pdf, 10, info);
         const o = await ocrConProgreso(imgs, info); lineas = o.lineas; conf = o.confianza; origen = 'foto';
       } else lineas = r.lineas;
+      if (S.nueva) S.nueva.fotosPlanilla = [];
     } else {
       if (fotos.length > 10) { info('Elige hasta 10 fotos a la vez.', 'warn'); return; }
       const o = await ocrConProgreso(fotos, info); lineas = o.lineas; conf = o.confianza; origen = 'foto';
+      try { S.nueva.fotosPlanilla = []; for (const f of fotos.slice(0, 5)) S.nueva.fotosPlanilla.push(await comprimirFoto(f, 1800, 330000)); } catch (x) { console.warn('Foto de planilla', x); }
     }
     const o = interpretar(lineas);
     if (!o.filas.length) {
@@ -1282,6 +1376,7 @@ function vAjustes() {
     <label class="f">Nombre de la empresa<input type="text" id="a-empresa" value="${esc(c.empresa || '')}" ${dis}></label>
     <label class="f">Ciudad por defecto<input type="text" id="a-ciudad" value="${esc(c.ciudad || 'Barranquilla')}" ${dis}></label>
     <label class="f">Punto de partida por defecto (bodega)<input type="text" id="a-bodega" value="${esc(c.bodega || '')}" placeholder="Ej: Cl 30 #44-50" ${dis}></label>
+    <label class="row small"><input type="checkbox" id="a-ccrean" ${c.conductoresCrean === false ? '' : 'checked'} ${dis}> Los conductores pueden crear su ruta con la foto de la planilla</label>
     ${esAdmin() ? `<button class="btn primary" data-act="guardarAjustes">Guardar</button>` : `<p class="small muted">Solo el administrador puede cambiar estos datos.</p>`}
   </div>
   <div class="card" style="max-width:560px">
@@ -1496,6 +1591,13 @@ document.addEventListener('click', async e => {
     case 'cancelDel': S.confirmDel = null; render(); break;
     case 'borrarRuta': borrarRuta(); break;
     case 'crearRuta': crearRuta(); break;
+    case 'nuevaConductor': if (unsub.paradas) { unsub.paradas(); unsub.paradas = null; } S.rutaId = null; S.nueva = null; S.view = 'nueva'; render(); window.scrollTo(0, 0); break;
+    case 'cancelarNueva': S.nueva = null; S.view = ''; { const saved = ls.get('rc_ruta_' + S.user.uid); const r = S.rutas.find(x => x.id === saved); if (r) { selectRuta(r.id, 'paradas'); break; } } render(); break;
+    case 'nEditar': abrirModal(vEditarParada(+v)); break;
+    case 'eAgregarItem': document.getElementById('e-items').insertAdjacentHTML('beforeend', filaItem({ ref: '', producto: '', cant: '', precio: '' }, 1)); break;
+    case 'eQuitarItem': el.closest('.e-item').remove(); break;
+    case 'eGuardar': guardarEdicion(+v); break;
+    case 'eEliminar': { if (!el.dataset.ok) { el.dataset.ok = '1'; el.textContent = '¿Seguro? Toca otra vez'; break; } const { paradas } = parsePlanilla(S.nueva.texto); conservarOrden(paradas, +v); cerrarModal(); toast('Cliente quitado de la lista.'); break; }
     case 'nOptimizar': S.nueva.modo = 'opt'; S.nueva._key = ''; updatePreview(); break;
     case 'nLista': S.nueva.modo = 'lista'; S.nueva._key = ''; updatePreview(); break;
     case 'nMover': { const [k, d] = v.split(',').map(Number); const o = S.nueva.orden, j = k + d; if (j < 0 || j >= o.length) break; [o[k], o[j]] = [o[j], o[k]]; S.nueva.modo = 'manual'; updatePreview(); break; }
@@ -1510,7 +1612,7 @@ document.addEventListener('click', async e => {
     case 'confirmReset': restablecerClave(v); break;
     case 'guardarAjustes': {
       const val = id => document.getElementById(id).value.trim();
-      await w(fb.setDoc(D('config/app'), { empresa: val('a-empresa'), ciudad: val('a-ciudad') || 'Barranquilla', bodega: val('a-bodega') }));
+      await w(fb.setDoc(D('config/app'), { empresa: val('a-empresa'), ciudad: val('a-ciudad') || 'Barranquilla', bodega: val('a-bodega'), conductoresCrean: document.getElementById('a-ccrean').checked }));
       toast('Ajustes guardados.'); break;
     }
     case 'actualizarApp': { const reg = await navigator.serviceWorker.getRegistration(); if (reg && reg.waiting) reg.waiting.postMessage('activar'); break; }

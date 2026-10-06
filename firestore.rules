@@ -17,6 +17,19 @@ service cloud.firestore {
     function rutaDe(rutaId) { return get(/databases/$(database)/documents/rutas/$(rutaId)).data; }
     function esConductorDe(rutaId) { return activo() && rutaDe(rutaId).conductorUid == request.auth.uid; }
     function soloCambia(campos) { return request.resource.data.diff(resource.data).affectedKeys().hasOnly(campos); }
+    function conductor() { return activo() && perfil().rol == 'conductor'; }
+    function conductoresCrean() {
+      return !exists(/databases/$(database)/documents/config/app)
+        || get(/databases/$(database)/documents/config/app).data.get('conductoresCrean', true) != false;
+    }
+    // Ruta nueva creada por el propio conductor desde la planilla
+    function rutaPropiaNueva(d) {
+      return conductor() && conductoresCrean()
+        && d.conductorUid == request.auth.uid && d.creadaPor == request.auth.uid
+        && d.creadaPorConductor == true && d.estado == 'cargue' && d.abierta == true
+        && d.liquidacion == null && d.cargue == null;
+    }
+    function rutaDespues(rutaId) { return getAfter(/databases/$(database)/documents/rutas/$(rutaId)).data; }
 
     // Instalación: la primera persona crea el administrador (una sola vez).
     match /config/instalacion {
@@ -49,7 +62,9 @@ service cloud.firestore {
 
     match /rutas/{rutaId} {
       allow read: if oficina() || (activo() && resource.data.conductorUid == request.auth.uid);
-      allow create, delete: if oficina();
+      allow create: if oficina() || rutaPropiaNueva(request.resource.data);
+      allow delete: if oficina()
+        || (conductor() && resource.data.creadaPor == request.auth.uid && resource.data.get('creadaPorConductor', false) == true && resource.data.estado == 'cargue');
       allow update: if oficina()
         || (activo() && resource.data.conductorUid == request.auth.uid
             && resource.data.estado != 'liquidada'
@@ -59,7 +74,11 @@ service cloud.firestore {
 
       match /paradas/{paradaId} {
         allow read: if oficina() || esConductorDe(rutaId);
-        allow create, delete: if oficina();
+        allow create: if oficina()
+          || (conductor() && rutaDespues(rutaId).creadaPor == request.auth.uid && rutaDespues(rutaId).conductorUid == request.auth.uid
+              && rutaDespues(rutaId).estado == 'cargue' && request.resource.data.estado == 'pendiente');
+        allow delete: if oficina()
+          || (esConductorDe(rutaId) && rutaDe(rutaId).creadaPor == request.auth.uid && rutaDe(rutaId).estado == 'cargue');
         allow update: if oficina()
           || (esConductorDe(rutaId) && rutaDe(rutaId).estado == 'en_ruta'
               && soloCambia(['estado', 'entregado', 'pago', 'motivo', 'recibe', 'firma', 'hora', 'novedad', 'refTransf', 'gps', 'fotos', 'orden']));
@@ -70,7 +89,8 @@ service cloud.firestore {
         allow create: if (oficina() || (esConductorDe(rutaId) && rutaDe(rutaId).estado != 'liquidada'))
           && request.resource.data.data is string && request.resource.data.data.size() < 400000;
         allow update: if false;
-        allow delete: if oficina();
+        allow delete: if oficina()
+          || (esConductorDe(rutaId) && rutaDe(rutaId).creadaPor == request.auth.uid && rutaDe(rutaId).estado == 'cargue');
       }
     }
   }

@@ -99,6 +99,7 @@ function armarLineas(data) {
       s += limpiarToken(w.text.trim());
       fin = w.bbox.x1;
     }
+    s = s.replace(/(\d)\s?mi\b/g, '$1 ml').replace(/(\d)\s?gr\b/g, '$1 g').replace(/(\d)\s?Kg\b/g, '$1 kg');
     out.push(s.replace(/\s*\|\s*\|\s*/g, ' | ').trim());
   }
   return out;

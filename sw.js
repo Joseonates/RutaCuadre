@@ -1,6 +1,6 @@
 // Service worker de RutaCuadre: guarda la app en el celular para que abra sin señal.
 // Al publicar cambios, sube el número de VERSION para que los celulares descarguen la nueva versión.
-const VERSION = 'rutacuadre-v1.1.0';
+const VERSION = 'rutacuadre-v1.2.0';
 const APP = [
   './', 'index.html', 'manifest.webmanifest', 'css/app.css',
   'js/app.js', 'js/config.js', 'js/geo.js', 'js/importar.js', 'js/ocr.js',
