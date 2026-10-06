@@ -483,7 +483,8 @@ function vParadas(r) {
   if (pend.length && r.estado === 'en_ruta') {
     const sig = pend[0];
     h += `<div class="next"><div class="eyebrow">Siguiente parada · ${sig.orden}</div>
-      <div><b>${esc(sig.cliente)}</b><div class="small">${esc(sig.direccion || '')}</div></div>
+      <div><b>${esc(sig.cliente)}</b><div class="small">${esc(sig.direccion || '')} · Fact. ${esc(sig.factura || '—')}</div>
+      <div class="small" style="margin-top:6px"><b>Mercancía a entregar · ${fmt(valorFactura(sig))}</b></div>${listaMercancia(sig)}</div>
       <div class="row">
         <a class="btn sm primary" href="${gmapsUno(sig, r)}" target="_blank" rel="noopener">Ir con Google Maps</a>
         <a class="btn sm" href="${wazeUno(sig, r)}" target="_blank" rel="noopener">Waze</a>
@@ -498,9 +499,21 @@ function vParadas(r) {
       <div class="n">${p.orden}</div>
       <div class="who"><b>${esc(p.cliente)}</b><span>${esc(p.direccion || '')}</span><span class="mono">Fact. ${esc(p.factura || '—')}${p.hora ? ' · ' + hora(p.hora) : ''}</span></div>
       <div class="amt">${fmt(v)}${chip(e)}</div>
+      <div class="merc-wrap">${listaMercancia(p)}</div>
     </button>${e !== 'pendiente' && p.telefono ? `<div class="row" style="justify-content:flex-end;margin-top:-4px"><a class="btn sm ghost" href="${waLink(p, r)}" target="_blank" rel="noopener">Enviar comprobante por WhatsApp</a></div>` : ''}`;
   }).join('') + `</div>`;
   return h;
+}
+// Mercancía de la parada: lo que hay que entregar, o lo entregado y devuelto si ya se gestionó.
+function listaMercancia(p) {
+  const e = p.estado || 'pendiente';
+  const filas = (p.items || []).map((i, k) => {
+    if (e === 'pendiente') return `<li><b class="num">${i.cant}</b><span>${esc(i.producto)}</span></li>`;
+    const en = entregadoDe(p, k), dv = i.cant - en;
+    return `<li class="${dv ? 'dev' : ''}"><b class="num">${en}${dv ? `<small>/${i.cant}</small>` : ''}</b><span>${esc(i.producto)}${dv ? ` <em>devuelve ${dv}</em>` : ''}</span></li>`;
+  }).join('');
+  const unid = (p.items || []).reduce((a, i) => a + i.cant, 0);
+  return `<ul class="merc" aria-label="Mercancía">${filas}</ul>${(p.items || []).length > 1 ? `<span class="merc-tot">${unid} unidades en total</span>` : ''}`;
 }
 function waLink(p, r) {
   let tel = String(p.telefono || '').replace(/\D/g, '');

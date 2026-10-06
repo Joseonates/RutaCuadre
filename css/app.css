@@ -196,3 +196,17 @@ body{min-height:100vh;-webkit-tap-highlight-color:transparent}
 body{overflow-x:hidden}
 .esq svg{max-height:380px}
 .btn.disabled{opacity:.45;pointer-events:none}
+/* mercancía por parada */
+.stop{align-items:start}
+.stop .n{padding-top:2px}
+.merc{list-style:none;margin:6px 0 0;padding:6px 0 0;border-top:1px dashed var(--line);display:flex;flex-direction:column;gap:3px;font-size:13.5px}
+.merc li{display:grid;grid-template-columns:44px 1fr;gap:8px;align-items:baseline}
+.merc li b{text-align:right;font-weight:700;font-variant-numeric:tabular-nums}
+.merc li b small{font-weight:500;color:var(--muted)}
+.merc li span{white-space:normal!important;overflow:visible!important;color:var(--ink)!important;font-size:13.5px!important}
+.merc li em{font-style:normal;color:var(--warn);font-weight:600;font-size:12px}
+.merc li.dev b{color:var(--warn)}
+.merc-tot{font-size:12px!important;color:var(--muted)!important;margin-top:2px}
+.next .merc{border-top-color:color-mix(in srgb,var(--accent) 35%,transparent)}
+.stop .merc-wrap{grid-column:2 / 4;min-width:0;display:flex;flex-direction:column}
+.stop .merc{margin-top:0}
