@@ -1,0 +1,77 @@
+rules_version = '2';
+// Reglas de seguridad de RutaCuadre.
+// - Oficina y administrador: ven y editan todo.
+// - Conductor: solo ve sus rutas abiertas y solo puede registrar entregas, cargue, gastos, cartera y fotos.
+// - Usuarios bloqueados o sin perfil: no ven nada.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function logueado() { return request.auth != null; }
+    function perfilRef() { return /databases/$(database)/documents/usuarios/$(request.auth.uid); }
+    function perfil() { return get(perfilRef()).data; }
+    function activo() { return logueado() && exists(perfilRef()) && perfil().activo == true; }
+    function oficina() { return activo() && perfil().rol in ['admin', 'oficina']; }
+    function admin() { return activo() && perfil().rol == 'admin'; }
+    function instalada() { return exists(/databases/$(database)/documents/config/instalacion); }
+    function instalandoAhora() { return logueado() && !instalada() && existsAfter(/databases/$(database)/documents/config/instalacion); }
+    function rutaDe(rutaId) { return get(/databases/$(database)/documents/rutas/$(rutaId)).data; }
+    function esConductorDe(rutaId) { return activo() && rutaDe(rutaId).conductorUid == request.auth.uid; }
+    function soloCambia(campos) { return request.resource.data.diff(resource.data).affectedKeys().hasOnly(campos); }
+
+    // Instalación: la primera persona crea el administrador (una sola vez).
+    match /config/instalacion {
+      allow get: if true;
+      allow create: if logueado() && !instalada()
+        && getAfter(perfilRef()).data.rol == 'admin';
+      allow update, delete: if false;
+    }
+    match /config/app {
+      allow read: if activo();
+      allow write: if admin();
+    }
+
+    // Acceso por usuario: traduce el nombre de usuario al correo interno para iniciar sesión.
+    match /accesos/{usuario} {
+      allow get: if true;
+      allow list: if oficina();
+      allow create, update: if oficina() || instalandoAhora();
+      allow delete: if admin();
+    }
+
+    match /usuarios/{uid} {
+      allow read: if (logueado() && request.auth.uid == uid) || oficina();
+      allow create: if (oficina() && (request.resource.data.rol == 'conductor' || admin()))
+        || (instalandoAhora() && request.auth.uid == uid && request.resource.data.rol == 'admin');
+      allow update: if admin()
+        || (oficina() && resource.data.rol == 'conductor' && request.resource.data.rol == 'conductor');
+      allow delete: if admin();
+    }
+
+    match /rutas/{rutaId} {
+      allow read: if oficina() || (activo() && resource.data.conductorUid == request.auth.uid);
+      allow create, delete: if oficina();
+      allow update: if oficina()
+        || (activo() && resource.data.conductorUid == request.auth.uid
+            && resource.data.estado != 'liquidada'
+            && soloCambia(['estado', 'cargue', 'gastos', 'cartera'])
+            && (request.resource.data.estado == resource.data.estado
+                || (resource.data.estado == 'cargue' && request.resource.data.estado == 'en_ruta')));
+
+      match /paradas/{paradaId} {
+        allow read: if oficina() || esConductorDe(rutaId);
+        allow create, delete: if oficina();
+        allow update: if oficina()
+          || (esConductorDe(rutaId) && rutaDe(rutaId).estado == 'en_ruta'
+              && soloCambia(['estado', 'entregado', 'pago', 'motivo', 'recibe', 'firma', 'hora', 'novedad', 'refTransf', 'gps', 'fotos', 'orden']));
+      }
+
+      match /fotos/{fotoId} {
+        allow read: if oficina() || esConductorDe(rutaId);
+        allow create: if (oficina() || (esConductorDe(rutaId) && rutaDe(rutaId).estado != 'liquidada'))
+          && request.resource.data.data is string && request.resource.data.data.size() < 400000;
+        allow update: if false;
+        allow delete: if oficina();
+      }
+    }
+  }
+}
