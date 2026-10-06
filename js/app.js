@@ -3,6 +3,7 @@ import * as fb from '../vendor/firebase-sdk.js';
 import { firebaseConfig, DOMINIO_USUARIOS, USAR_EMULADOR } from './config.js';
 import { parseDir, optimizar, costoParadas, kmDe, kmTxt, lblDir } from './geo.js';
 import { extraerLineas, interpretar } from './importar.js';
+import { leerFotos } from './ocr.js';
 
 // ---------- utilidades ----------
 const app = document.getElementById('app');
@@ -933,10 +934,14 @@ function vNueva() {
   <label class="row small"><input type="checkbox" id="n-regreso" data-n="regreso" ${N.regreso ? 'checked' : ''}> El vehículo regresa a la bodega al terminar</label>
   </div>
   <div class="card">
-    <div class="row between"><h3>Listado de clientes y mercancía</h3><div class="row"><button class="btn sm primary" data-act="importar">Importar PDF</button><button class="btn sm" data-act="copiarEnc">Copiar encabezados</button></div></div>
-    <input type="file" id="n-file" accept="application/pdf,.pdf" hidden>
+    <div class="row between"><h3>Listado de clientes y mercancía</h3><div class="row">
+      <label class="btn sm primary">Tomar foto de la planilla<input type="file" id="n-cam" accept="image/*" capture="environment" hidden></label>
+      <label class="btn sm">Subir PDF o fotos<input type="file" id="n-file" accept="application/pdf,.pdf,image/*" multiple hidden></label>
+      <button class="btn sm ghost" data-act="copiarEnc">Copiar encabezados</button></div></div>
     <div id="impStatus"></div>
-    <p class="small muted">Importa el PDF que entrega la empresa, o copia las filas desde Excel y pégalas aquí. Una fila por producto, en este orden: <span class="mono">Cliente · Dirección · Teléfono · Factura · Referencia · Producto · Cantidad · Precio unitario</span>. Las filas con la misma factura se agrupan en una sola parada y la app las ordena para recorrer menos distancia.</p>
+    <details class="small muted"><summary>Consejos para la foto</summary>
+      Una foto por página, con la hoja plana y completa dentro de la foto. Buena luz, sin sombras ni reflejos, y el celular derecho sobre la hoja. Si la planilla tiene varias páginas, elige todas las fotos juntas en "Subir PDF o fotos".</details>
+    <p class="small muted">Toma una foto de la planilla, importa el PDF que entrega la empresa, o copia las filas desde Excel y pégalas aquí. Una fila por producto, en este orden: <span class="mono">Cliente · Dirección · Teléfono · Factura · Referencia · Producto · Cantidad · Precio unitario</span>. Las filas con la misma factura se agrupan en una sola parada y la app las ordena para recorrer menos distancia.</p>
     <textarea id="n-texto" data-n="texto" style="min-height:160px;font-family:var(--f-mono);font-size:13px" placeholder="Pega aquí las filas copiadas de Excel">${esc(N.texto)}</textarea>
     <div id="preview"></div>
   </div>
@@ -1043,30 +1048,82 @@ function cargarPdfjs() {
   return pdfjsPromise;
 }
 const limpiaCelda = v => String(v ?? '').replace(/[\t\r\n]+/g, ' ').trim();
-async function importarPdf(file) {
-  const st = document.getElementById('impStatus'); if (!st || !file) return;
-  const info = (m, cls = 'info') => { st.innerHTML = `<div class="banner ${cls}"><div>${m}</div></div>`; };
+function barra(p) { return `<div class="progress" style="margin-top:6px"><i style="width:${Math.round(p * 100)}%;background:var(--accent)"></i></div>`; }
+function aplicarFilas(o, extra, origen) {
+  const st = document.getElementById('impStatus');
+  const tsv = o.filas.map(f => [f.cliente, f.direccion, f.telefono, f.factura, f.referencia, f.producto, int(f.cantidad), int(f.precio)].map(limpiaCelda).join('\t'));
+  const habia = !!S.nueva.texto.trim();
+  S.nueva.texto = ENCABEZADOS + '\n' + tsv.join('\n'); S.nueva.modo = 'opt'; S.nueva._key = '';
+  const ta = document.getElementById('n-texto'); if (ta) ta.value = S.nueva.texto;
+  updatePreview();
+  const av = extra.concat(o.avisos);
+  const sinPrecio = o.filas.filter(f => !int(f.precio)).length; if (sinPrecio) av.push(`${sinPrecio} filas quedaron sin precio.`);
+  const noDir = [...new Set(o.filas.filter(f => !parseDir(f.direccion)).map(f => f.cliente))];
+  if (noDir.length) av.push(`Dirección incompleta o no reconocida: ${noDir.join(', ')}.`);
+  st.innerHTML = `<div class="banner ok"><div><b>Leí ${o.clientes} clientes y ${o.filas.length} líneas de producto${origen === 'foto' ? ' de la foto' : ''}.</b> ${habia ? 'Reemplazaron el listado que había. ' : ''}${origen === 'foto' ? 'Compara con la hoja las direcciones, teléfonos, cantidades y precios antes de crear la ruta; puedes corregirlos en el cuadro.' : 'Revisa los datos en el cuadro antes de crear la ruta; puedes corregirlos ahí mismo.'}</div></div>
+    ${av.length ? `<div class="banner warn"><div><b>Para revisar:</b><br>${av.slice(0, 10).map(esc).join('<br>')}</div></div>` : ''}`;
+}
+async function pdfAImagenes(pdf, max, info) {
+  const out = [];
+  const n = Math.min(pdf.numPages, max);
+  for (let i = 1; i <= n; i++) {
+    info(`El PDF es escaneado. Preparando página ${i} de ${n}…`);
+    const pg = await pdf.getPage(i), vp0 = pg.getViewport({ scale: 1 });
+    const vp = pg.getViewport({ scale: Math.min(3, 2200 / vp0.width) });
+    const cv = document.createElement('canvas'); cv.width = Math.round(vp.width); cv.height = Math.round(vp.height);
+    const cx = cv.getContext('2d'); cx.fillStyle = '#fff'; cx.fillRect(0, 0, cv.width, cv.height);
+    await pg.render({ canvasContext: cx, viewport: vp }).promise;
+    out.push(await new Promise(r => cv.toBlob(r, 'image/png')));
+  }
+  return out;
+}
+async function ocrConProgreso(imagenes, info) {
+  const t0 = Date.now();
+  const r = await leerFotos(imagenes, m => {
+    const pag = m.n > 1 ? ` (foto ${m.i} de ${m.n})` : '';
+    if (m.paso === 'cargar') info(`Preparando el lector de fotos. La primera vez descarga unos 6 MB…${barra(m.p || 0)}`);
+    else if (m.paso === 'preparar') info(`Mejorando la imagen${pag}…`);
+    else info(`Leyendo la planilla${pag}… ${Math.round((m.p || 0) * 100)}%${barra(m.p || 0)}`);
+  });
+  console.info('OCR', r.confianza, 'confianza', Date.now() - t0, 'ms');
+  return r;
+}
+async function importarArchivos(files) {
+  const st = document.getElementById('impStatus'); if (!st || !files.length) return;
+  const info = (m, cls = 'info') => { st.innerHTML = `<div class="banner ${cls}"><div style="width:100%">${m}</div></div>`; };
+  const bloquear = on => document.querySelectorAll('#n-cam,#n-file').forEach(x => { x.disabled = on; x.parentElement.classList.toggle('disabled', on); });
+  bloquear(true);
   try {
-    info('Abriendo el PDF…');
-    const lib = await cargarPdfjs();
-    const pdf = await lib.getDocument({ data: new Uint8Array(await file.arrayBuffer()) }).promise;
-    const r = await extraerLineas(pdf, 30, (i, n) => info(`Leyendo página ${i} de ${n}…`));
-    if (r.escaneado) { info('<b>Este PDF es una imagen escaneada</b> y no trae texto que se pueda leer sin inteligencia artificial. Pide a la empresa el PDF digital (el que genera su sistema) o el listado en Excel.', 'warn'); return; }
-    const o = interpretar(r.lineas);
-    if (!o.filas.length) {
-      info(`<b>No reconocí productos en este PDF.</b> Su formato es distinto al esperado. Puedes copiar el listado a Excel y pegarlo aquí.<details style="margin-top:6px"><summary>Ver el texto que extraje</summary><pre class="mono" style="white-space:pre-wrap;max-height:240px;overflow:auto">${esc(r.lineas.join('\n').slice(0, 6000))}</pre></details>`, 'warn'); return;
+    const pdfs = files.filter(f => f.type === 'application/pdf' || /\.pdf$/i.test(f.name));
+    const fotos = files.filter(f => /^image\//.test(f.type) || /\.(jpe?g|png|webp|heic)$/i.test(f.name));
+    if (!pdfs.length && !fotos.length) { info('Elige un PDF o una foto (JPG o PNG).', 'warn'); return; }
+    if (pdfs.length && fotos.length) { info('Elige un PDF o fotos, no los dos a la vez.', 'warn'); return; }
+    if (pdfs.length > 1) { info('Elige un solo PDF a la vez.', 'warn'); return; }
+    let lineas = [], extra = [], origen = 'pdf', conf = 100;
+    if (pdfs.length) {
+      info('Abriendo el PDF…');
+      const lib = await cargarPdfjs();
+      const pdf = await lib.getDocument({ data: new Uint8Array(await pdfs[0].arrayBuffer()) }).promise;
+      const r = await extraerLineas(pdf, 30, (i, n) => info(`Leyendo página ${i} de ${n}…`));
+      if (r.total > r.paginas) extra.push(`El PDF tiene ${r.total} páginas; se leyeron las primeras ${r.paginas}.`);
+      if (r.escaneado) {
+        if (pdf.numPages > 10) extra.push('Del PDF escaneado se leyeron las primeras 10 páginas.');
+        const imgs = await pdfAImagenes(pdf, 10, info);
+        const o = await ocrConProgreso(imgs, info); lineas = o.lineas; conf = o.confianza; origen = 'foto';
+      } else lineas = r.lineas;
+    } else {
+      if (fotos.length > 10) { info('Elige hasta 10 fotos a la vez.', 'warn'); return; }
+      const o = await ocrConProgreso(fotos, info); lineas = o.lineas; conf = o.confianza; origen = 'foto';
     }
-    const tsv = o.filas.map(f => [f.cliente, f.direccion, f.telefono, f.factura, f.referencia, f.producto, int(f.cantidad), int(f.precio)].map(limpiaCelda).join('\t'));
-    const habia = !!S.nueva.texto.trim();
-    S.nueva.texto = ENCABEZADOS + '\n' + tsv.join('\n'); S.nueva.modo = 'opt'; S.nueva._key = '';
-    const ta = document.getElementById('n-texto'); if (ta) ta.value = S.nueva.texto;
-    updatePreview();
-    const av = o.avisos.slice();
-    if (r.total > r.paginas) av.unshift(`El PDF tiene ${r.total} páginas; se leyeron las primeras ${r.paginas}.`);
-    const sinPrecio = o.filas.filter(f => !int(f.precio)).length; if (sinPrecio) av.push(`${sinPrecio} filas quedaron sin precio.`);
-    st.innerHTML = `<div class="banner ok"><div><b>Leí ${o.clientes} clientes y ${o.filas.length} líneas de producto.</b> ${habia ? 'Reemplazaron el listado que había. ' : ''}Revisa los datos en el cuadro antes de crear la ruta; puedes corregirlos ahí mismo.</div></div>
-      ${av.length ? `<div class="banner warn"><div><b>Para revisar:</b><br>${av.slice(0, 8).map(esc).join('<br>')}</div></div>` : ''}`;
-  } catch (e) { info('No se pudo leer el PDF. ' + esc(e.message || e), 'bad'); }
+    const o = interpretar(lineas);
+    if (!o.filas.length) {
+      info(`<b>No reconocí productos ${origen === 'foto' ? 'en la foto' : 'en este PDF'}.</b> ${origen === 'foto' ? 'Toma la foto más de cerca, con buena luz y la hoja plana. ' : 'Su formato es distinto al esperado. '}También puedes copiar el listado a Excel y pegarlo aquí.<details style="margin-top:6px"><summary>Ver el texto que leí</summary><pre class="mono" style="white-space:pre-wrap;max-height:240px;overflow:auto">${esc(lineas.join('\n').slice(0, 6000))}</pre></details>`, 'warn');
+      return;
+    }
+    if (origen === 'foto' && conf < 70) extra.unshift('La foto se leyó con dificultad. Si ves muchos errores, tómala de nuevo más de cerca y con mejor luz.');
+    aplicarFilas(o, extra, origen);
+  } catch (e) { console.error(e); info('No se pudo leer el archivo. ' + esc(e.message || e), 'bad'); }
+  finally { bloquear(false); }
 }
 
 // ---- conductores y usuarios ----
@@ -1439,7 +1496,6 @@ document.addEventListener('click', async e => {
     case 'cancelDel': S.confirmDel = null; render(); break;
     case 'borrarRuta': borrarRuta(); break;
     case 'crearRuta': crearRuta(); break;
-    case 'importar': { const f = document.getElementById('n-file'); if (f) f.click(); break; }
     case 'nOptimizar': S.nueva.modo = 'opt'; S.nueva._key = ''; updatePreview(); break;
     case 'nLista': S.nueva.modo = 'lista'; S.nueva._key = ''; updatePreview(); break;
     case 'nMover': { const [k, d] = v.split(',').map(Number); const o = S.nueva.orden, j = k + d; if (j < 0 || j >= o.length) break; [o[k], o[j]] = [o[j], o[k]]; S.nueva.modo = 'manual'; updatePreview(); break; }
@@ -1490,7 +1546,7 @@ document.addEventListener('input', e => {
 });
 document.addEventListener('change', async e => {
   const el = e.target;
-  if (el.id === 'n-file') { const f = el.files[0]; el.value = ''; importarPdf(f); return; }
+  if (el.id === 'n-file' || el.id === 'n-cam') { const fl = [...el.files]; el.value = ''; importarArchivos(fl); return; }
   if (el.id === 'f-foto' && el.files[0] && S.draft) {
     const f = el.files[0]; el.value = '';
     try { toast('Procesando foto…'); S.draft.fotosNuevas.push(await comprimirFoto(f)); render(); } catch (err) { toast(err.message || 'No se pudo usar la foto.'); }

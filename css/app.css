@@ -195,3 +195,4 @@ body{min-height:100vh;-webkit-tap-highlight-color:transparent}
 }
 body{overflow-x:hidden}
 .esq svg{max-height:380px}
+.btn.disabled{opacity:.45;pointer-events:none}

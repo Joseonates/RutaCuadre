@@ -63,12 +63,16 @@ function lineaProducto(celdas, linea) {
     if (!m || !cuadra(numero(m[3]), numero(m[4]), numero(m[5]))) return null;
     cs = [m[1], m[2], m[3], m[4], m[5]].filter(Boolean);
   }
+  // montos con espacio en vez de punto de miles ("$2 100" → "$2.100")
+  cs = cs.map(c => /^\$?\s?\d{1,3}(?: \d{3})+$/.test(c) ? c.replace(/ (?=\d{3})/g, '.') : c);
+  let codigo = '';
+  const pareceCodigo = c => reCodigo.test(c) && !esNum(c) && (/\d/.test(c) && /[A-Z]/i.test(c) || /^[A-Z0-9]+[-\/.][A-Z0-9]+$/.test(c));
+  if (cs.length >= 3 && pareceCodigo(cs[0]) && tieneLetras(cs[1])) codigo = cs.shift();
   const idxTexto = cs.findIndex(c => tieneLetras(c) && !esNum(c));
   if (idxTexto < 0) return null;
-  let codigo = '';
   const lead = [];
   for (let k = 0; k < idxTexto; k++) {
-    if (k === 0 && reCodigo.test(cs[0]) && /\d/.test(cs[0]) && /[A-Z]/i.test(cs[0])) codigo = cs[0];
+    if (k === 0 && !codigo && reCodigo.test(cs[0]) && /\d/.test(cs[0]) && /[A-Z]/i.test(cs[0])) codigo = cs[0];
     else if (esNum(cs[k])) lead.push({ s: cs[k], n: numero(cs[k]) });
     else return null;
   }
@@ -104,9 +108,9 @@ const reClienteNum = /^\s*(\d{1,3})\s*[.)\-]\s+(.+)$/;
 const reClienteEtq = /\b(?:cliente|raz[oó]n social|se[nñ]or(?:es)?)\s*:\s*([^|·]+)/i;
 const reFactura = /\b(?:factura|fact\.?|fra\.?|remisi[oó]n|pedido|documento|doc\.)\s*(?:de venta\s*)?(?:n[°º.o]*\s*)?[:#]?\s*([A-Z]{0,5}[\s-]?\d[\dA-Z\-]{1,})/i;
 const reFV = /\b(FV|FE|FAC|FC|REM)[\s-]?(\d{2,}[\dA-Z\-]*)\b/;
-const reDireccionEtq = /\b(?:direcci[oó]n|dir\.?)\s*:\s*([^|·]+)/i;
+const reDireccionEtq = /\b(?:direcci[oó]n|dir\.)\s*(?::|\|)?\s*([^|·]+)/i;
 const reVia = /\b((?:avenida|av\.?|ak|ac|calle|cll?\.?|carrera|cra\.?|kra\.?|kr\.?|cr\.?|diagonal|dg\.?|transversal|tv\.?|km\.?|kil[oó]metro)\s*\d[^|·]*)/i;
-const reTelEtq = /\b(?:tel[eé]?f?o?n?o?s?|tel\.?|cel(?:ular)?\.?|m[oó]vil|whatsapp)\s*:?\s*(\+?57\s?)?([\d][\d\s\-]{6,14}\d)/i;
+const reTelEtq = /\b(?:tel[eé]?f?o?n?o?s?|tel\.?|cel(?:ular)?\.?|m[oó]vil|whatsapp)\s*[:|]?\s*(\+?57\s?)?([\d][\d\s\-]{6,14}\d)/i;
 const reCel = /\b(3\d{2}[\s-]?\d{3}[\s-]?\d{4})\b/;
 
 function limpiarNombre(s) {
@@ -114,10 +118,30 @@ function limpiarNombre(s) {
     .replace(/\b(C\.?C\.?|NIT|N\.I\.T\.?|CED(?:ULA)?\.?)\s*[:#]?\s*[\d.\-]+.*$/i, '')
     .replace(/\s{2,}/g, ' ').trim().replace(/[.,;:-]+$/, '');
 }
+// En fotos, el símbolo # a veces se lee como 4, 41, %* o *. Se corrige solo cuando el número resultante sería imposible.
+export function corregirNumeral(dir) {
+  const via = '(?:avenida|av\\.?|ak|ac|calle|cll?\\.?|carrera|cra\\.?|kra\\.?|kr\\.?|cr\\.?|diagonal|dg\\.?|transversal|tv\\.?)';
+  const re = new RegExp('^(' + via + '\\s*\\d{1,3}\\s?(?:[A-H](?![a-z]))?(?:\\s?bis)?(?:\\s?[A-H](?![a-z]))?(?:\\s?(?:sur|este))?)\\s+(?:(%\\*|\\*|%|H|tt|ff|[4892]\\s)\\s*|(41|82|4|8|9|2)(?=\\d))(\\d{1,3}\\s?[A-H]?\\s*[-.]\\s*\\d{1,3}.*)$', 'i');
+  dir = String(dir).replace(/^C1(?=\d)/, 'Cl ').replace(/^(\S+\s*\d{1,3}\S*\s+#?\s*\d{1,3}[A-H]?)\.(\d{1,3})\b/i, '$1-$2');
+  const m = dir.match(re);
+  if (!m) return dir;
+  const [, ini, simbolo, pref, resto] = m;
+  if (simbolo) return `${ini} #${resto}`;
+  const pegado = parseInt(pref + resto, 10);
+  if (pref.length === 2 && parseInt(pref[1] + resto, 10) < 200 && pref !== '41' && pref !== '82') return `${ini} #${pref[1]}${resto}`;
+  if (pegado < 200) return dir;              // p. ej. "Cl 58 45-30" es válido y no se toca
+  return `${ini} #${resto}`;
+}
 function limpiarDireccion(s) {
   return s.replace(/\s*(?:barrio|br\.?|b\/|sector|urb\.?)\b.*$/i, '')
     .replace(/\s*\b(?:tel[eé]?f?o?n?o?|tel\.?|cel\.?)\b.*$/i, '')
     .replace(/\s{2,}/g, ' ').trim().replace(/[.,;:-]+$/, '');
+}
+// Quita basura al inicio del renglón (marcas o letras sueltas que deja una foto).
+function quitarBasura(linea) {
+  const cs = linea.split(' | ');
+  while (cs.length > 1 && /^(?:[^\wÁÉÍÓÚÑáéíóúñ$#]{1,3}|[a-zA-Z]{1,2}|[^\w\s]{1,4}\w?)$/.test(cs[0].trim()) && !/^\d/.test(cs[0].trim())) cs.shift();
+  return cs.join(' | ');
 }
 
 export function interpretar(lineas) {
@@ -128,7 +152,7 @@ export function interpretar(lineas) {
   let actual = null;
   let enBloque = false; // estamos leyendo productos del cliente actual
   for (const raw of lineas) {
-    const linea = String(raw || '').trim();
+    const linea = quitarBasura(String(raw || '').trim());
     if (!linea) continue;
     const celdas = linea.split(' | ');
     if (reIgnorar.test(linea)) {
@@ -161,8 +185,8 @@ export function interpretar(lineas) {
       if (!pend.factura) { if (enBloque && !pend.nuevo) pend = nuevo(); pend.factura = f; pend.nuevo = true; }
     }
     if (!pend.direccion) {
-      if ((m = linea.match(reDireccionEtq))) pend.direccion = limpiarDireccion(m[1]);
-      else if (pend.nuevo && (m = linea.match(reVia))) pend.direccion = limpiarDireccion(m[1]);
+      if ((m = linea.match(reDireccionEtq)) && m[1].trim()) pend.direccion = corregirNumeral(limpiarDireccion(m[1]));
+      else if (pend.nuevo && (m = linea.match(reVia))) pend.direccion = corregirNumeral(limpiarDireccion(m[1]));
     }
     if (!pend.telefono && (m = linea.match(reTelEtq) || linea.match(reCel))) {
       pend.telefono = (m[2] || m[1] || '').replace(/[^\d]/g, '').replace(/^57(?=3\d{9}$)/, '');

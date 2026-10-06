@@ -1,9 +1,9 @@
 // Service worker de RutaCuadre: guarda la app en el celular para que abra sin señal.
 // Al publicar cambios, sube el número de VERSION para que los celulares descarguen la nueva versión.
-const VERSION = 'rutacuadre-v1.0.1';
+const VERSION = 'rutacuadre-v1.1.0';
 const APP = [
   './', 'index.html', 'manifest.webmanifest', 'css/app.css',
-  'js/app.js', 'js/config.js', 'js/geo.js', 'js/importar.js',
+  'js/app.js', 'js/config.js', 'js/geo.js', 'js/importar.js', 'js/ocr.js',
   'vendor/firebase-sdk.js', 'vendor/jspdf.umd.min.js', 'vendor/jspdf.plugin.autotable.min.js',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/icon-maskable-512.png', 'icons/apple-touch-icon.png'
 ];
