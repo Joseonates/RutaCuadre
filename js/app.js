@@ -18,6 +18,7 @@ const ls = { get(k) { try { return localStorage.getItem(k); } catch (e) { return
 const normUsuario = u => String(u || '').trim().toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/\s+/g, '.');
 const nuevoId = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+const conLimite = (p, ms = 20000) => Promise.race([p, sleep(ms).then(() => { throw { code: 'timeout' }; })]);
 
 const ESTADOS = { pendiente: { t: 'Pendiente' }, entregado: { t: 'Entregado' }, parcial: { t: 'Parcial' }, rechazado: { t: 'Rechazado' }, no_visitado: { t: 'No visitado' } };
 const RUTA_EST = { cargue: 'Por cargar', en_ruta: 'En ruta', liquidada: 'Liquidada' };
@@ -62,9 +63,17 @@ const C = p => fb.collection(S.db, p);
 function errTxt(e) {
   const c = (e && e.code) || '';
   const M = {
-    'permission-denied': 'No tienes permiso para esta acción.',
+    'permission-denied': 'Firebase rechazó la operación por permisos. Revisa que las reglas de Firestore (archivo firestore.rules) estén pegadas y publicadas en Firestore Database › Reglas.',
+    'failed-precondition': 'La base de datos Firestore no está lista. Créala en Firestore Database › Crear base de datos.',
+    'not-found': 'No se encontró la base de datos Firestore. Créala en Firestore Database › Crear base de datos.',
+    'timeout': 'Firebase no respondió. Revisa la conexión a internet y que la base de datos Firestore esté creada.',
+    'auth/api-key-not-valid.-please-pass-a-valid-api-key.': 'La apiKey de js/config.js no es válida. Copia de nuevo la configuración desde Firebase.',
+    'auth/invalid-api-key': 'La apiKey de js/config.js no es válida. Copia de nuevo la configuración desde Firebase.',
+    'auth/configuration-not-found': 'Falta activar Authentication en Firebase (Authentication › Comenzar) y el método Correo electrónico/contraseña.',
+    'auth/unauthorized-domain': 'Agrega el dominio de la app en Firebase › Authentication › Configuración › Dominios autorizados.',
     'unavailable': 'Sin conexión con el servidor.',
     'auth/invalid-credential': 'Usuario o clave incorrectos.',
+    'auth/sin-acceso': 'Ese usuario no existe en RutaCuadre. Los usuarios se crean dentro de la app (el administrador al instalar; los conductores en la pestaña Conductores), no en la consola de Firebase.',
     'auth/wrong-password': 'Usuario o clave incorrectos.',
     'auth/user-not-found': 'Usuario o clave incorrectos.',
     'auth/too-many-requests': 'Demasiados intentos. Espera unos minutos.',
@@ -75,7 +84,7 @@ function errTxt(e) {
     'auth/operation-not-allowed': 'Activa "Correo electrónico/contraseña" en Firebase Authentication.',
     'auth/invalid-email': 'El usuario tiene caracteres no permitidos.'
   };
-  return M[c] || (e && e.message) || String(e || 'Error');
+  return M[c] || ((e && e.message) ? e.message + (c ? ` (${c})` : '') : String(e || 'Error'));
 }
 
 // Escritura que no bloquea la pantalla sin señal: Firestore la guarda en el celular y la sube al volver la conexión.
@@ -101,8 +110,9 @@ async function boot() {
   if (USAR_EMULADOR) { fb.connectAuthEmulator(S.auth, 'http://127.0.0.1:9099'); fb.connectFirestoreEmulator(S.db, '127.0.0.1', 8080); }
   fb.onAuthStateChanged(S.auth, user => {
     S.user = user;
+    if (S.instalando) return;
     detenerTodo();
-    if (!user) { S.perfil = null; revisarInstalacion(); return; }
+    if (!user) { S.perfil = null; if (S.fase === 'instalar') return; revisarInstalacion(); return; }
     S.fase = 'cargando'; render();
     unsub.perfil = fb.onSnapshot(D('usuarios/' + user.uid), snap => {
       if (!snap.exists()) {
@@ -124,7 +134,11 @@ async function revisarInstalacion() {
   try {
     const s = await Promise.race([fb.getDoc(D('config/instalacion')), sleep(8000).then(() => { throw { code: 'unavailable' }; })]);
     S.fase = s.exists() ? 'login' : 'instalar';
-  } catch (e) { S.fase = 'login'; if (e.code === 'unavailable') S.loginErr = S.loginErr || 'Sin conexión. Necesitas internet para iniciar sesión la primera vez.'; }
+  } catch (e) {
+    console.error('Revisión de instalación', e);
+    S.fase = 'login';
+    S.loginErr = S.loginErr || (e.code === 'unavailable' ? 'Sin conexión con Firebase. Revisa internet y que la base de datos Firestore esté creada.' : errTxt(e));
+  }
   render();
 }
 
@@ -336,27 +350,42 @@ async function instalarApp() {
   const v = id => document.getElementById(id).value.trim();
   const empresa = v('i-empresa'), nombre = v('i-nombre'), usuario = normUsuario(v('i-usuario')), clave = document.getElementById('i-clave').value;
   const err = document.getElementById('iErr');
-  if (!empresa || !nombre) { err.textContent = 'Escribe el nombre de la empresa y tu nombre.'; return; }
-  if (!/^[a-z0-9._-]{3,30}$/.test(usuario)) { err.textContent = 'El usuario debe tener de 3 a 30 letras o números, sin espacios.'; return; }
-  if (clave.length < 6) { err.textContent = 'La clave debe tener al menos 6 caracteres.'; return; }
+  const fallo = m => { S.loginErr = m; const el = document.getElementById('iErr'); if (el) el.textContent = m; };
+  if (!empresa || !nombre) { fallo('Escribe el nombre de la empresa y tu nombre.'); return; }
+  if (!/^[a-z0-9._-]{3,30}$/.test(usuario)) { fallo('El usuario debe tener de 3 a 30 letras o números, sin espacios.'); return; }
+  if (clave.length < 6) { fallo('La clave debe tener al menos 6 caracteres.'); return; }
   const btn = document.querySelector('[data-act="instalarApp"]'); btn.disabled = true; btn.textContent = 'Creando…';
+  err.textContent = '';
   S.instalando = true;
+  let cred = null;
   try {
     const email = `${usuario}@${DOMINIO_USUARIOS}`;
-    const cred = await fb.createUserWithEmailAndPassword(S.auth, email, clave);
+    btn.textContent = 'Creando usuario…';
+    cred = await conLimite(fb.createUserWithEmailAndPassword(S.auth, email, clave));
     const uid = cred.user.uid, ahora = new Date().toISOString();
+    btn.textContent = 'Guardando en la base de datos…';
     const b = fb.writeBatch(S.db);
     b.set(D('usuarios/' + uid), { nombre, usuario, rol: 'admin', activo: true, creado: ahora, placa: '', telefono: '' });
     b.set(D('accesos/' + usuario), { email, uid });
     b.set(D('config/instalacion'), { fecha: ahora, empresa });
-    await b.commit();
-    await fb.setDoc(D('config/app'), { empresa, ciudad: 'Barranquilla', bodega: '' });
+    await conLimite(b.commit());
+    await conLimite(fb.setDoc(D('config/app'), { empresa, ciudad: 'Barranquilla', bodega: '' }));
     ls.set('rc_ultimo_usuario', usuario);
-    S.instalando = false;
-    if (S.fase !== 'app') { const s = await fb.getDoc(D('usuarios/' + uid)); if (s.exists()) { S.perfil = Object.assign({ uid }, s.data()); iniciarSesion(); } }
+    S.instalando = false; S.loginErr = '';
+    const s = await fb.getDoc(D('usuarios/' + uid));
+    S.user = cred.user; S.perfil = Object.assign({ uid }, s.data());
+    if (unsub.perfil) unsub.perfil();
+    unsub.perfil = fb.onSnapshot(D('usuarios/' + uid), snap => { if (!snap.exists() || !snap.data().activo) { fb.signOut(S.auth); return; } S.perfil = Object.assign({ uid }, snap.data()); updateCtx(); }, () => { });
+    iniciarSesion();
+    toast('Administrador creado. Bienvenido a RutaCuadre.');
   } catch (e) {
-    S.instalando = false; err.textContent = errTxt(e); btn.disabled = false; btn.textContent = 'Crear administrador';
-    if (S.auth.currentUser) fb.signOut(S.auth);
+    console.error('Instalación', e);
+    // si se alcanzó a crear el acceso pero falló la base de datos, se borra para poder reintentar con el mismo usuario
+    if (cred && cred.user) { try { await fb.deleteUser(cred.user); } catch (x) { console.warn('No se pudo borrar el acceso incompleto', x); } }
+    try { if (S.auth.currentUser) await fb.signOut(S.auth); } catch (x) { }
+    S.instalando = false;
+    fallo('No se pudo crear el administrador. ' + errTxt(e));
+    btn.disabled = false; btn.textContent = 'Crear administrador';
   }
 }
 
@@ -367,11 +396,11 @@ async function entrar() {
   const btn = document.querySelector('#fLogin button[type=submit]'); btn.disabled = true; btn.textContent = 'Entrando…';
   try {
     const a = await fb.getDoc(D('accesos/' + usuario));
-    if (!a.exists()) throw { code: 'auth/invalid-credential' };
+    if (!a.exists()) throw { code: 'auth/sin-acceso' };
     S.loginErr = '';
     ls.set('rc_ultimo_usuario', usuario);
     await fb.signInWithEmailAndPassword(S.auth, a.data().email, clave);
-  } catch (e) { err.textContent = errTxt(e); btn.disabled = false; btn.textContent = 'Entrar'; }
+  } catch (e) { console.error('Ingreso', e); S.loginErr = errTxt(e); err.textContent = S.loginErr; btn.disabled = false; btn.textContent = 'Entrar'; }
 }
 
 function vCuentaModal() {
@@ -1052,15 +1081,16 @@ function auth2() {
 async function crearCuentaAuth(usuario, clave) {
   const a2 = auth2();
   let email = `${usuario}@${DOMINIO_USUARIOS}`, cred;
-  try { cred = await fb.createUserWithEmailAndPassword(a2, email, clave); }
+  try { cred = await conLimite(fb.createUserWithEmailAndPassword(a2, email, clave)); }
   catch (e) {
     if (e.code !== 'auth/email-already-in-use') throw e;
     email = `${usuario}.${Date.now().toString(36)}@${DOMINIO_USUARIOS}`;
-    cred = await fb.createUserWithEmailAndPassword(a2, email, clave);
+    cred = await conLimite(fb.createUserWithEmailAndPassword(a2, email, clave));
   }
   const uid = cred.user.uid;
-  await fb.signOut(a2);
-  return { uid, email };
+  const deshacer = async () => { try { await fb.deleteUser(cred.user); } catch (x) { console.warn(x); } try { await fb.signOut(a2); } catch (x) { } };
+  const listo = async () => { try { await fb.signOut(a2); } catch (x) { } };
+  return { uid, email, deshacer, listo };
 }
 function vConductores() {
   const puedeEditar = u => esAdmin() || u.rol === 'conductor';
@@ -1096,13 +1126,16 @@ async function crearUsuario() {
   try {
     const ex = await fb.getDoc(D('accesos/' + usuario));
     if (ex.exists()) throw { code: 'auth/email-already-in-use' };
-    const { uid, email } = await crearCuentaAuth(usuario, clave);
-    const b = fb.writeBatch(S.db);
-    b.set(D('usuarios/' + uid), { nombre, usuario, rol, activo: true, placa: v('u-placa').trim(), telefono: v('u-tel').trim(), creado: new Date().toISOString(), creadoPor: S.user.uid });
-    b.set(D('accesos/' + usuario), { email, uid });
-    await b.commit();
+    const cta = await crearCuentaAuth(usuario, clave);
+    try {
+      const b = fb.writeBatch(S.db);
+      b.set(D('usuarios/' + cta.uid), { nombre, usuario, rol, activo: true, placa: v('u-placa').trim(), telefono: v('u-tel').trim(), creado: new Date().toISOString(), creadoPor: S.user.uid });
+      b.set(D('accesos/' + usuario), { email: cta.email, uid: cta.uid });
+      await conLimite(b.commit());
+    } catch (e) { await cta.deshacer(); throw e; }
+    await cta.listo();
     toast(`Usuario ${usuario} creado.`); S.limpiar = true; render();
-  } catch (e) { err.textContent = errTxt(e); btn.disabled = false; btn.textContent = 'Crear usuario'; }
+  } catch (e) { console.error('Crear usuario', e); err.textContent = 'No se pudo crear el usuario. ' + errTxt(e); btn.disabled = false; btn.textContent = 'Crear usuario'; }
 }
 function vResetModal(u) {
   return `<div class="modal-in"><div class="row between"><h2>Nueva clave</h2><button class="btn sm" data-act="cerrarModal">Cancelar</button></div>
@@ -1117,7 +1150,8 @@ async function restablecerClave(uidViejo) {
   const btn = document.querySelector('[data-act="confirmReset"]'); btn.disabled = true; btn.textContent = 'Asignando…';
   try {
     // Firebase no permite cambiar la clave de otro usuario desde la app: se crea un acceso nuevo y se traspasan sus datos y rutas.
-    const { uid, email } = await crearCuentaAuth(u.usuario, clave);
+    const cta = await crearCuentaAuth(u.usuario, clave);
+    const { uid, email } = cta;
     const datos = Object.assign({}, u); delete datos.uid;
     const abiertas = await fb.getDocs(fb.query(C('rutas'), fb.where('conductorUid', '==', uidViejo), fb.where('abierta', '==', true)));
     const b = fb.writeBatch(S.db);
@@ -1125,7 +1159,8 @@ async function restablecerClave(uidViejo) {
     b.update(D('usuarios/' + uidViejo), { activo: false, reemplazadoPor: uid });
     b.set(D('accesos/' + u.usuario), { email, uid });
     abiertas.docs.forEach(d => b.update(D('rutas/' + d.id), { conductorUid: uid }));
-    await b.commit();
+    try { await conLimite(b.commit()); } catch (e) { await cta.deshacer(); throw e; }
+    await cta.listo();
     cerrarModal(); toast(`Clave nueva asignada a ${u.nombre}.`);
   } catch (e) { err.textContent = errTxt(e); btn.disabled = false; btn.textContent = 'Asignar clave'; }
 }
